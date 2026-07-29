@@ -1,0 +1,18 @@
+# Developer Onboarding & API Standards Guide
+
+## 1. Code Repository Architecture
+All Guidely services follow a microservices architecture hosted in Git repositories under the `guidely-org` GitHub organization. Code reviews require at least one approving review from a CODEOWNER before merging into `main`.
+
+## 2. API Design & Versioning
+- All HTTP REST endpoints must use kebab-case for paths (e.g. `/api/v1/document-chunks`).
+- APIs must accept and return JSON payloads with standard `snake_case` attributes.
+- Use explicit HTTP status codes: 200 OK for successful fetches, 201 Created for new resources, 400 Bad Request for invalid inputs, and 500 Internal Error for system issues.
+
+## 3. Local Development Setup
+1. Clone the repository: `git clone git@github.com:guidely-org/app.git`
+2. Copy environment file: `cp .env.example .env`
+3. Run containerized services: `docker compose up -d`
+4. Access local Swagger API documentation at `http://localhost:8000/docs`.
+
+## 4. CI/CD & Deployment
+Merging to `main` triggers automated GitHub Actions unit tests and static linting (`ruff` & `mypy`). Upon green builds, deployments automatically rollout to the Staging environment. Production deployments require a release tag approval in Slack `#deployments`.
