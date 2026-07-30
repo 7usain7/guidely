@@ -45,11 +45,29 @@ class VectorStore:
             json.dump(self.cache, f)
 
     def _generate_embedding(self, text: str) -> Tuple[List[float], bool]:
-        """Generates embedding for text with 100% cache hit lookup and local fallback."""
+        """Generates embedding for text with 100% cache hit lookup, Gemini/OpenAI API or local fallback."""
         text_hash = hashlib_str(text)
         if text_hash in self.cache:
             return self.cache[text_hash], True  # Cache hit!
 
+        # 1. Try Gemini API if GEMINI_API_KEY is configured
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if gemini_key and gemini_key != "your_gemini_api_key_here":
+            try:
+                from google import genai
+                client = genai.Client(api_key=gemini_key)
+                res = client.models.embed_content(
+                    model="text-embedding-004",
+                    contents=text,
+                )
+                vec = list(res.embedding.values)
+                self.cache[text_hash] = vec
+                self._save_cache()
+                return vec, False
+            except Exception as e:
+                print(f"[VectorStore] Gemini embedding fallback due to: {e}")
+
+        # 2. Try OpenAI API if OPENAI_API_KEY is configured
         openai_key = os.getenv("OPENAI_API_KEY")
         if openai_key and openai_key != "your_openai_api_key_here":
             try:
@@ -66,7 +84,7 @@ class VectorStore:
             except Exception as e:
                 print(f"[VectorStore] OpenAI embedding fallback due to: {e}")
 
-        # Deterministic lightweight semantic vector embedding (fallback)
+        # 3. Deterministic lightweight semantic vector embedding (fallback)
         words = text.lower().split()
         dim = 128
         vec = [0.0] * dim
@@ -142,7 +160,7 @@ class VectorStore:
         return results, latency_ms, query_was_cached
 
     def generate_llm_answer(self, query: str, retrieved_results: List[Tuple[DocumentChunk, float]]) -> Tuple[str, List[SourceCitation]]:
-        """Generates answer using LLM or structured RAG synthesizer with source citations."""
+        """Generates answer using Gemini, OpenAI or structured RAG synthesizer with source citations."""
         if not retrieved_results:
             return "I couldn't find any relevant documents answering your query in the internal system.", []
 
@@ -159,19 +177,35 @@ class VectorStore:
             ))
             context_snippets.append(f"Source [{chunk.filename}]:\n{chunk.content}")
 
+        joined_context = "\n\n".join(context_snippets)
+        prompt = (
+            "You are Guidely, an internal company knowledge assistant. "
+            "Answer the user's question directly and concisely based strictly on the provided context passages. "
+            "Cite your sources where appropriate.\n\n"
+            f"Context:\n{joined_context}\n\n"
+            f"Question: {query}\nAnswer:"
+        )
+
+        # 1. Try Gemini API
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if gemini_key and gemini_key != "your_gemini_api_key_here":
+            try:
+                from google import genai
+                client = genai.Client(api_key=gemini_key)
+                res = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                )
+                return res.text.strip(), citations
+            except Exception as e:
+                print(f"[VectorStore] Gemini LLM generation fallback due to: {e}")
+
+        # 2. Try OpenAI API
         openai_key = os.getenv("OPENAI_API_KEY")
         if openai_key and openai_key != "your_openai_api_key_here":
             try:
                 from openai import OpenAI
                 client = OpenAI(api_key=openai_key)
-                joined_context = "\n\n".join(context_snippets)
-                prompt = (
-                    "You are Guidely, an internal company knowledge assistant. "
-                    "Answer the user's question directly and concisely based strictly on the provided context passages. "
-                    "Cite your sources where appropriate.\n\n"
-                    f"Context:\n{joined_context}\n\n"
-                    f"Question: {query}\nAnswer:"
-                )
                 res = client.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[{"role": "user", "content": prompt}],
@@ -179,9 +213,9 @@ class VectorStore:
                 )
                 return res.choices[0].message.content.strip(), citations
             except Exception as e:
-                print(f"[VectorStore] LLM call fallback due to: {e}")
+                print(f"[VectorStore] OpenAI LLM call fallback due to: {e}")
 
-        # Smart fallback RAG synthesis
+        # 3. Smart fallback RAG synthesis
         top_chunk = retrieved_results[0][0]
         summary_answer = (
             f"Based on **{top_chunk.filename}**, here is the relevant information regarding your query:\n\n"
