@@ -2,7 +2,6 @@ import os
 import json
 import numpy as np
 import time
-import math
 import hashlib
 from typing import List, Dict, Tuple, Optional, Any
 from backend.models.record import DocumentChunk, SourceCitation
@@ -45,62 +44,28 @@ class VectorStore:
             json.dump(self.cache, f)
 
     def _generate_embedding(self, text: str) -> Tuple[List[float], bool]:
-        """Generates embedding for text with 100% cache hit lookup, Gemini/OpenAI API or local fallback."""
+        """Generates embedding for text via Google Gemini API with 100% SHA-256 cache hit lookup."""
         text_hash = hashlib_str(text)
         if text_hash in self.cache:
             return self.cache[text_hash], True  # Cache hit!
 
-        # 1. Try Gemini API if GEMINI_API_KEY is configured
         gemini_key = os.getenv("GEMINI_API_KEY")
-        if gemini_key and gemini_key != "your_gemini_api_key_here":
-            try:
-                from google import genai
-                client = genai.Client(api_key=gemini_key)
-                res = client.models.embed_content(
-                    model="text-embedding-004",
-                    contents=text,
-                )
-                vec = list(res.embedding.values)
-                self.cache[text_hash] = vec
-                self._save_cache()
-                return vec, False
-            except Exception as e:
-                print(f"[VectorStore] Gemini embedding fallback due to: {e}")
+        if not gemini_key or gemini_key == "your_gemini_api_key_here":
+            raise RuntimeError("GEMINI_API_KEY Missing: Please configure GEMINI_API_KEY in your .env file for vector embeddings.")
 
-        # 2. Try OpenAI API if OPENAI_API_KEY is configured
-        openai_key = os.getenv("OPENAI_API_KEY")
-        if openai_key and openai_key != "your_openai_api_key_here":
-            try:
-                from openai import OpenAI
-                client = OpenAI(api_key=openai_key)
-                response = client.embeddings.create(
-                    input=text,
-                    model="text-embedding-3-small"
-                )
-                vec = response.data[0].embedding
-                self.cache[text_hash] = vec
-                self._save_cache()
-                return vec, False
-            except Exception as e:
-                print(f"[VectorStore] OpenAI embedding fallback due to: {e}")
-
-        # 3. Deterministic lightweight semantic vector embedding (fallback)
-        words = text.lower().split()
-        dim = 128
-        vec = [0.0] * dim
-        for w in words:
-            h = int(hashlib_str(w), 16)
-            idx = h % dim
-            val = ((h >> 8) % 100) / 100.0
-            vec[idx] += val
-        
-        # Normalize vector to unit length
-        norm = math.sqrt(sum(x * x for x in vec)) or 1.0
-        norm_vec = [x / norm for x in vec]
-        
-        self.cache[text_hash] = norm_vec
-        self._save_cache()
-        return norm_vec, False
+        try:
+            from google import genai
+            client = genai.Client(api_key=gemini_key)
+            res = client.models.embed_content(
+                model="gemini-embedding-001",
+                contents=text,
+            )
+            vec = list(res.embeddings[0].values)
+            self.cache[text_hash] = vec
+            self._save_cache()
+            return vec, False
+        except Exception as e:
+            raise RuntimeError(f"Google Gemini API embedding error: {e}")
 
     def index_document(self, filename: str, chunks: List[DocumentChunk], file_hash: str) -> Tuple[int, bool]:
         """Indexes document chunks into vector store. Returns (chunks_indexed, is_full_cache_hit)."""
@@ -144,6 +109,13 @@ class VectorStore:
         q_norm = np.linalg.norm(query_vec) or 1.0
 
         for chunk_id, chunk_vec in self.embeddings.items():
+            # Dimensionality check: re-embed via API if vector dimensions mismatch
+            if len(chunk_vec) != len(query_vec):
+                chunk = self.chunk_store[chunk_id]
+                new_vec, _ = self._generate_embedding(chunk.content)
+                self.embeddings[chunk_id] = new_vec
+                chunk_vec = new_vec
+
             dot_product = np.dot(query_vec, chunk_vec)
             c_norm = np.linalg.norm(chunk_vec) or 1.0
             similarity = float(dot_product / (q_norm * c_norm))
@@ -160,7 +132,7 @@ class VectorStore:
         return results, latency_ms, query_was_cached
 
     def generate_llm_answer(self, query: str, retrieved_results: List[Tuple[DocumentChunk, float]]) -> Tuple[str, List[SourceCitation]]:
-        """Generates answer using Gemini, OpenAI or structured RAG synthesizer with source citations."""
+        """Generates answer strictly via Groq API (Llama 3.3 / Llama 3.1) with source citations."""
         if not retrieved_results:
             return "I couldn't find any relevant documents answering your query in the internal system.", []
 
@@ -186,43 +158,32 @@ class VectorStore:
             f"Question: {query}\nAnswer:"
         )
 
-        # 1. Try Gemini API
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        if gemini_key and gemini_key != "your_gemini_api_key_here":
-            try:
-                from google import genai
-                client = genai.Client(api_key=gemini_key)
-                res = client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=prompt,
-                )
-                return res.text.strip(), citations
-            except Exception as e:
-                print(f"[VectorStore] Gemini LLM generation fallback due to: {e}")
+        groq_key = os.getenv("GROQ_API_KEY")
+        if not groq_key or groq_key == "your_groq_api_key_here":
+            raise RuntimeError("GROQ_API_KEY Missing: Please configure GROQ_API_KEY in your .env file.")
 
-        # 2. Try OpenAI API
-        openai_key = os.getenv("OPENAI_API_KEY")
-        if openai_key and openai_key != "your_openai_api_key_here":
-            try:
-                from openai import OpenAI
-                client = OpenAI(api_key=openai_key)
-                res = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.2
-                )
-                return res.choices[0].message.content.strip(), citations
-            except Exception as e:
-                print(f"[VectorStore] OpenAI LLM call fallback due to: {e}")
-
-        # 3. Smart fallback RAG synthesis
-        top_chunk = retrieved_results[0][0]
-        summary_answer = (
-            f"Based on **{top_chunk.filename}**, here is the relevant information regarding your query:\n\n"
-            f"> {top_chunk.content}\n\n"
-            f"For further details, please review the complete source document referenced below."
-        )
-        return summary_answer, citations
+        try:
+            from groq import Groq
+            client = Groq(api_key=groq_key)
+            
+            # Ultra-fast Groq Llama 3 models
+            groq_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-8b-8192"]
+            for model_name in groq_models:
+                try:
+                    response = client.chat.completions.create(
+                        model=model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.2
+                    )
+                    content = response.choices[0].message.content
+                    if content:
+                        return content.strip(), citations
+                except Exception as model_err:
+                    print(f"[VectorStore] Groq model '{model_name}' attempt error: {model_err}")
+            
+            raise RuntimeError("All Groq models failed to generate response.")
+        except Exception as e:
+            raise RuntimeError(f"Groq API error: {e}")
 
     def get_metrics(self) -> Dict[str, Any]:
         """Calculates system metrics including median/p95 latency and cache hit percentages."""

@@ -6,7 +6,7 @@ router = APIRouter(prefix="/api/search", tags=["search"])
 
 @router.post("", response_model=QueryResponse)
 def search_and_answer(request: QueryRequest):
-    """Processes a user question, executes vector similarity search, and generates a cited answer."""
+    """Processes a user question, executes vector similarity search, and generates a cited LLM answer."""
     question = request.question.strip() if request.question else ""
     if not question:
         raise HTTPException(
@@ -21,7 +21,7 @@ def search_and_answer(request: QueryRequest):
         )
 
     top_k = request.top_k or 3
-    retrieved_results, latency_ms, is_cached = vector_store.search(question, top_k=top_k)
+    retrieved_results, search_latency_ms, is_cached = vector_store.search(question, top_k=top_k)
     
     if not retrieved_results:
         raise HTTPException(
@@ -34,6 +34,6 @@ def search_and_answer(request: QueryRequest):
     return QueryResponse(
         answer=answer,
         sources=sources,
-        latency_ms=round(latency_ms, 2),
+        latency_ms=round(search_latency_ms, 2),
         cache_hit=is_cached
     )

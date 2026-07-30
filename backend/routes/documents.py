@@ -14,12 +14,31 @@ SAMPLE_DOCS_DIR = os.path.abspath(
 
 @router.post("/index-all")
 def index_all_sample_documents() -> Dict[str, Any]:
-    """Indexes all sample documents present in backend/data/sample-docs/."""
+    """Indexes all sample documents and purges deleted documents from vector store memory."""
     os.makedirs(SAMPLE_DOCS_DIR, exist_ok=True)
     doc_files = glob.glob(os.path.join(SAMPLE_DOCS_DIR, "*.*"))
-    
+    current_filenames = set(os.path.basename(f) for f in doc_files)
+
+    # Purge deleted documents from vector store memory
+    stored_filenames = set(chunk.filename for chunk in vector_store.chunk_store.values())
+    deleted_filenames = stored_filenames - current_filenames
+
+    for del_file in deleted_filenames:
+        cids_to_del = [cid for cid, chunk in vector_store.chunk_store.items() if chunk.filename == del_file]
+        for cid in cids_to_del:
+            if cid in vector_store.chunk_store:
+                del vector_store.chunk_store[cid]
+            if cid in vector_store.embeddings:
+                del vector_store.embeddings[cid]
+        if del_file in vector_store.doc_hashes:
+            del vector_store.doc_hashes[del_file]
+
     if not doc_files:
-        return {"message": "No sample documents found", "indexed_files": 0}
+        return {
+            "message": "No sample documents found. Purged deleted files from memory.",
+            "indexed_files": 0,
+            "purged_files": list(deleted_filenames)
+        }
 
     indexed_summary = []
     total_chunks = 0
@@ -39,10 +58,11 @@ def index_all_sample_documents() -> Dict[str, Any]:
         })
 
     return {
-        "message": f"Successfully indexed {len(indexed_summary)} documents",
+        "message": f"Successfully indexed {len(indexed_summary)} documents (purged {len(deleted_filenames)} deleted files)",
         "total_documents": len(indexed_summary),
         "total_chunks": total_chunks,
         "all_cache_hit": all_cached_count == len(indexed_summary),
+        "purged_files": list(deleted_filenames),
         "files": indexed_summary
     }
 
