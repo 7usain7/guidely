@@ -53,6 +53,7 @@ application-local.yaml
 
 # Dependencies
 node_modules/
+frontend/node_modules/
 vendor/
 .venv/
 venv/
@@ -61,6 +62,7 @@ __pycache__/
 
 # Build output
 dist/
+frontend/dist/
 build/
 out/
 target/
@@ -77,6 +79,10 @@ tmp/
 temp/
 .cache/
 
+# Guidely cache & data
+backend/data/embedding_cache.json
+backend/data/faiss_index
+
 # Editors and operating systems
 .vscode/
 .idea/
@@ -84,9 +90,6 @@ temp/
 Thumbs.db
 *.swp
 *.swo
-
-# Environment and sensitive configuration
-secret.*
 
 # Requirements
 requirements.md
