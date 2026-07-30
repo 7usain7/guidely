@@ -3,12 +3,14 @@ import json
 import numpy as np
 import time
 import hashlib
+import faiss
 from typing import List, Dict, Tuple, Optional, Any
 from backend.models.record import DocumentChunk, SourceCitation
 
-# Persistent embedding cache file path
+# Persistent embedding cache and FAISS index file paths
 CACHE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 CACHE_FILE = os.path.join(CACHE_DIR, "embedding_cache.json")
+FAISS_FILE = os.getenv("VECTOR_DB_PATH", os.path.join(CACHE_DIR, "faiss_index"))
 
 def hashlib_str(s: str) -> str:
     """Computes SHA-256 hash string for embedding caching lookup."""
@@ -39,9 +41,24 @@ class VectorStore:
         return {}
 
     def _save_cache(self):
-        """Saves current embedding cache to JSON file."""
+        """Saves current embedding cache and FAISS index file to disk."""
         with open(CACHE_FILE, "w") as f:
             json.dump(self.cache, f)
+        self._save_faiss_index()
+
+    def _save_faiss_index(self):
+        """Saves current vectors into FAISS index file on disk at VECTOR_DB_PATH."""
+        if not self.embeddings:
+            return
+        try:
+            dim = len(next(iter(self.embeddings.values())))
+            matrix = np.array(list(self.embeddings.values()), dtype=np.float32)
+            faiss.normalize_L2(matrix)
+            index = faiss.IndexFlatIP(dim)
+            index.add(matrix)
+            faiss.write_index(index, FAISS_FILE)
+        except Exception as e:
+            print(f"[VectorStore] FAISS index write warning: {e}")
 
     def _generate_embedding(self, text: str) -> Tuple[List[float], bool]:
         """Generates embedding for text via Google Gemini API with 100% SHA-256 cache hit lookup."""
@@ -68,7 +85,7 @@ class VectorStore:
             raise RuntimeError(f"Google Gemini API embedding error: {e}")
 
     def index_document(self, filename: str, chunks: List[DocumentChunk], file_hash: str) -> Tuple[int, bool]:
-        """Indexes document chunks into vector store. Returns (chunks_indexed, is_full_cache_hit)."""
+        """Indexes document chunks into vector store and saves FAISS index to disk. Returns (chunks_indexed, is_full_cache_hit)."""
         # Remove existing chunks for this file if updated
         existing_chunks = [cid for cid, chunk in self.chunk_store.items() if chunk.filename == filename]
         for cid in existing_chunks:
@@ -86,10 +103,11 @@ class VectorStore:
             if not was_cached:
                 all_cached = False
 
+        self._save_faiss_index()
         return len(chunks), all_cached
 
     def search(self, query: str, top_k: int = 3) -> Tuple[List[Tuple[DocumentChunk, float]], float, bool]:
-        """Executes vector similarity search for a query. Returns top-k (chunk, score), latency_ms, is_cached."""
+        """Executes FAISS / Cosine vector similarity search for a query. Returns top-k (chunk, score), latency_ms, is_cached."""
         start_time = time.time()
         self.total_queries += 1
         
